@@ -11,7 +11,7 @@ from psutil import cpu_count
 from utils import *
 
 
-def create_tf_example(filename, encoded_jpeg, annotations, resize=True):
+def create_tf_example(filename, encoded_jpeg, annotations, stats):
     """
     This function create a tf.train.Example from the Waymo frame.
 
@@ -23,15 +23,14 @@ def create_tf_example(filename, encoded_jpeg, annotations, resize=True):
     returns:
         - tf_example [tf.Train.Example]: tf example in the objection detection api format.
     """
-    if not resize:
-        encoded_jpg_io = io.BytesIO(encoded_jpeg)
-        image = Image.open(encoded_jpg_io)
-        width, height = image.size
-    else:
-        image_tensor = tf.io.decode_jpeg(encoded_jpeg)
-        image_res = tf.cast(tf.image.resize(image_tensor, (640, 640)), tf.uint8)
-        encoded_jpeg = tf.io.encode_jpeg(image_res).numpy()
-        width, height = 640, 640
+    encoded_jpg_io = io.BytesIO(encoded_jpeg)
+    image = Image.open(encoded_jpg_io)
+    width_org, height_org = image.size
+    
+    image_tensor = tf.io.decode_jpeg(encoded_jpeg)
+    image_res = tf.cast(tf.image.resize(image_tensor, (640, 640)), tf.uint8)
+    encoded_jpeg = tf.io.encode_jpeg(image_res).numpy()
+    width, height = 640, 640
 
     mapping = {1: 'vehicle', 2: 'pedestrian', 4: 'cyclist'}
     image_format = b'jpg'
@@ -43,9 +42,17 @@ def create_tf_example(filename, encoded_jpeg, annotations, resize=True):
     classes = []
     filename = filename.encode('utf8')
 
+    ratiow = width / width_org
+    ratioh = height / height_org
+    
     for ann in annotations:
         xmin, ymin = ann.box.center_x - 0.5 * ann.box.length, ann.box.center_y - 0.5 * ann.box.width
         xmax, ymax = ann.box.center_x + 0.5 * ann.box.length, ann.box.center_y + 0.5 * ann.box.width
+        xmin *= ratiow
+        xmax *= ratiow
+        ymin *= ratioh
+        ymax *= ratioh
+        
         xmins.append(xmin / width)
         xmaxs.append(xmax / width)
         ymins.append(ymin / height)
@@ -57,7 +64,10 @@ def create_tf_example(filename, encoded_jpeg, annotations, resize=True):
         'image/height': int64_feature(height),
         'image/width': int64_feature(width),
         'image/filename': bytes_feature(filename),
+        'image/weather': bytes_feature(b"sunny"),
         'image/source_id': bytes_feature(filename),
+        'weather': bytes_feature(stats.weather.encode('utf8')),
+        'time_of_day': bytes_feature(stats.time_of_day.encode('utf8')),
         'image/encoded': bytes_feature(encoded_jpeg),
         'image/format': bytes_feature(image_format),
         'image/object/bbox/xmin': float_list_feature(xmins),
@@ -70,7 +80,7 @@ def create_tf_example(filename, encoded_jpeg, annotations, resize=True):
     return tf_example
 
 
-def download_tfr(filename, data_dir):
+def download_tfr(filename, temp_dir):
     """
     download a single tf record 
 
@@ -82,7 +92,7 @@ def download_tfr(filename, data_dir):
         - local_path [str]: path where the file is saved
     """
     # create data dir
-    dest = os.path.join(data_dir, 'raw')
+    dest = os.path.join(temp_dir, 'raw')
     os.makedirs(dest, exist_ok=True)
 
     # download the tf record file
@@ -117,7 +127,7 @@ def process_tfr(path, data_dir):
         frame.ParseFromString(bytearray(data.numpy()))
         encoded_jpeg, annotations = parse_frame(frame)
         filename = file_name.replace('.tfrecord', f'_{idx}.tfrecord')
-        tf_example = create_tf_example(filename, encoded_jpeg, annotations)
+        tf_example = create_tf_example(filename, encoded_jpeg, annotations, frame.context.stats)
         writer.write(tf_example.SerializeToString())
     writer.close()
 
